@@ -1,0 +1,8 @@
+{
+  "appKey": "vgdlcy3404v7hsm",
+  "namespaceId": "4973131457",
+  "catalogRoot": "/_BROLL CATALOG",
+  "displayRoot": "/Hickey Marketing Team Folder",
+  "redirectUri": "https://zee-slate.github.io/hmg-broll-library/",
+  "notes": "Public Dropbox editor app key only. No app secret, access token, refresh token, catalog records, or real media belongs in the static site."
+}
