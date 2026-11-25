@@ -1,4 +1,4 @@
-import {FACETS,effectiveTags,generalSafe,generalApproved,applyPending,searchRows,canReviewCatalog} from "./policy.js";
+import {FACETS,effectiveTags,generalSafe,generalApproved,applyPending,searchRows,canReviewCatalog,createCatalogLoader,requireCatalogGeneration} from "./policy.js";
 import {REASONS,qualityLabel,learningPriority,learningSummary} from "./feedback.js";
 
 const $ = function(id) {return document.getElementById(id);};
@@ -98,24 +98,24 @@ async function ownPending() {
   });
   state.pending=events.filter(Boolean);
 }
-async function loadCatalog() {
-  notice("Opening your Dropbox catalog…");
+const loadCatalog=createCatalogLoader(async function() {
   state.demo=false;
   $("demo-banner").classList.add("hidden");
   const manifest=await download("catalog/manifest.json");
-  state.manifest=manifest;
-  state.catalogMetadata=await api("files/get_metadata",{path:state.config.catalogRoot}).catch(function(){return null;});
+  const catalogMetadata=await api("files/get_metadata",{path:state.config.catalogRoot}).catch(function(){return null;});
   const allowed=await pool(manifest.clients,4,async function(client){
     try{await api("files/get_metadata",{path:client.path});return client;}catch(error){return null;}
   });
   const clients=allowed.filter(Boolean);
   if(!clients.length)throw new Error("Your Dropbox account cannot open any configured client footage folders.");
-  state.allowedClients=clients;
-  state.client=clients.some(function(c){return c.slug===state.client;})?state.client:(clients.find(function(c){return c.slug===state.config.defaultClient;}) || clients[0]).slug;
   const docs=await pool(clients,4,async function(client){return download("catalog/"+client.slug+".json");});
   const general=await download("catalog/general.json");
-  state.processingStatus=await download("status.json").catch(function(){return null;});
-  if([...docs,general].some(function(doc){return doc.generated_at!==manifest.generated_at;}))throw new Error("The processor is publishing a new catalog. Refresh in a moment.");
+  const processingStatus=await download("status.json").catch(function(){return null;});
+  requireCatalogGeneration(manifest,[...docs,general]);
+  // Keep the last complete library usable until every replacement document is ready.
+  state.manifest=manifest;state.catalogMetadata=catalogMetadata;state.allowedClients=clients;
+  state.client=clients.some(function(c){return c.slug===state.client;})?state.client:(clients.find(function(c){return c.slug===state.config.defaultClient;}) || clients[0]).slug;
+  state.processingStatus=processingStatus;
   const unique=new Map();
   [...docs,general].forEach(function(doc){doc.records.forEach(function(record){unique.set(record.file_id,record);});});
   state.records=[...unique.values()];
@@ -128,13 +128,18 @@ async function loadCatalog() {
   $("updated").textContent="Catalog updated "+new Date(manifest.generated_at).toLocaleString();
   notice(canReview()?"":"You can browse the library. A configured reviewer account is needed to approve footage.");
   await render();
-}
+},{
+  onStart:function(){if(!state.records.length)notice("Opening your Dropbox catalog…");$("connect").disabled=true;$("refresh").setAttribute("aria-busy","true");},
+  onUpdating:function(){notice(state.records.length?"New clips are being added. You can keep browsing while the library updates.":"New clips are being added. Your library will open automatically when this update is ready.");},
+  onFinish:function(){$("connect").disabled=false;$("refresh").removeAttribute("aria-busy");}
+});
 function setAccount() {
   $("account-name").textContent=state.demo?"Demo editor":state.account?.name?.display_name || "Dropbox editor";
   $("account-role").textContent=canReview()?"Editor · reviewer":"Editor · read only";
   $("account-avatar").textContent=state.demo?"DE":(state.account?.name?.display_name || "DB").split(" ").map(function(x){return x[0];}).slice(0,2).join("");
 }
 function buildClients() {
+  const scrollTop=$("clients").scrollTop,scrollLeft=$("clients").scrollLeft;
   $("clients").replaceChildren();
   (state.allowedClients || []).forEach(function(client){
     const button=element("button","client-button"+(client.slug===state.client && !state.generalOnly?" active":""));
@@ -143,6 +148,7 @@ function buildClients() {
     $("clients").append(button);
   });
   $("general-pool").classList.toggle("active",state.generalOnly);
+  $("clients").scrollTop=scrollTop;$("clients").scrollLeft=scrollLeft;
 }
 function rowsWithPending() {return state.records.map(function(record){return applyPending(record,state.pending);});}
 function formatDuration(value) {const seconds=Math.floor(value || 0);return Math.floor(seconds/60)+":"+String(seconds%60).padStart(2,"0");}

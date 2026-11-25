@@ -2,6 +2,32 @@ export const FACETS = ["subject","action","setting","location","shot_type","came
 export const BLOCKING = new Set(["identifiable_people","minors","people_in_care_setting","license_plates","private_information","competitor_branding","uncertain_people_visibility"]);
 export const RANK = {hero:0,solid:1,filler:2,reject:3};
 
+export class CatalogUpdatingError extends Error {
+  constructor(){super("New clips are still being added. Please try opening the library again shortly.");this.name="CatalogUpdatingError";}
+}
+
+export function requireCatalogGeneration(manifest, documents) {
+  if(!manifest?.generated_at || documents.some(function(doc){return doc?.generated_at!==manifest.generated_at;}))throw new CatalogUpdatingError();
+}
+
+export function createCatalogLoader(read,{onStart=function(){},onUpdating=function(){},onFinish=function(){},wait=function(ms){return new Promise(function(resolve){setTimeout(resolve,ms);});},now=Date.now,retryMs=5000,maxWaitMs=300000}={}) {
+  let active=null;
+  return function load() {
+    if(active)return active;
+    active=(async function(){
+      const started=now();onStart();
+      while(true){
+        try{return await read();}
+        catch(error){
+          if(!(error instanceof CatalogUpdatingError) || now()-started>=maxWaitMs)throw error;
+          onUpdating();await wait(retryMs);
+        }
+      }
+    })().finally(function(){active=null;onFinish();});
+    return active;
+  };
+}
+
 export function canReviewCatalog(manifest, account, metadata) {
   if(!account?.account_id)return false;
   if((manifest?.reviewer_account_ids || []).includes(account.account_id))return true;
