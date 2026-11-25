@@ -1,4 +1,4 @@
-import {FACETS,effectiveTags,generalSafe,generalApproved,applyPending,searchRows,canReviewCatalog,createCatalogLoader,requireCatalogGeneration,originalPlaybackLink,reviewTier,reviewDecision} from "./policy.js";
+import {FACETS,effectiveTags,generalSafe,generalApproved,applyPending,searchRows,canReviewCatalog,createCatalogLoader,requireCatalogGeneration,originalPlaybackLink,reviewTier,reviewDecision,previewPath,checkedPreview,previewPlaybackLink} from "./policy.js";
 import {REASONS,qualityLabel,learningPriority,learningSummary} from "./feedback.js";
 
 const $ = function(id) {return document.getElementById(id);};
@@ -22,7 +22,7 @@ async function api(endpoint,args,rooted=true) {
 async function download(path,asBlob=false) {
   await tokenReady();
   const response=await fetch("https://content.dropboxapi.com/2/files/download",{method:"POST",headers:{Authorization:"Bearer "+state.token,"Dropbox-API-Path-Root":JSON.stringify({".tag":"namespace_id",namespace_id:state.config.namespaceId}),"Dropbox-API-Arg":ascii({path:child(path)})},signal:AbortSignal.timeout(30000)});
-  if(!response.ok)throw new Error("Catalog file is unavailable. Confirm Dropbox setup and refresh.");
+  if(!response.ok){const detail=await response.json().catch(function(){return {};});const error=new Error("Catalog file is unavailable. Confirm Dropbox setup and refresh.");error.status=response.status;error.dropboxKind=detail.error_summary || "";throw error;}
   return asBlob ? response.blob() : response.json();
 }
 async function tokenReady() {
@@ -181,7 +181,7 @@ function makeCard(record) {
   selection.addEventListener("click",function(event){event.stopPropagation();});
   selection.addEventListener("change",function(){toggleSelection(record);card.classList.toggle("selected",state.selected.has(record.file_id));});
   preview.append(selection);
-  const play=element("button","play-original-card","▶ Play original");play.type="button";play.setAttribute("aria-label","Play original "+record.name);
+  const play=element("button","play-original-card","▶ Play preview");play.type="button";play.setAttribute("aria-label","Play preview "+record.name);
   play.addEventListener("click",function(event){event.stopPropagation();openDetail(record);});preview.append(play);
   const info=element("div","clip-info");info.append(element("h3","",title(record)));
   const meta=element("div","clip-meta");
@@ -304,36 +304,52 @@ function rememberNotes() {
   document.querySelectorAll(".card-notes").forEach(function(button){if(button.dataset.draftKey===id)button.textContent=state.reviewDrafts.has(id)?"Notes · draft":"Notes";});
 }
 function stopOriginal() {
-  state.playbackSession++;clearTimeout(state.playbackTimer);
+  state.playbackSession++;clearTimeout(state.playbackTimer);clearTimeout(state.previewRetryTimer);
   const video=$("original-video");
   video.onerror=video.onloadedmetadata=video.onloadeddata=video.oncanplay=video.onplaying=video.onwaiting=video.onstalled=null;
   video.pause();video.removeAttribute("src");video.load();
   $("note-time").disabled=true;
 }
-async function playOriginal(record=state.active) {
+async function playOriginal(record=state.active, original=false) {
   if(!record || state.active?.file_id!==record.file_id)return;
   stopOriginal();const session=state.playbackSession,video=$("original-video"),button=$("play-original");
   const current=function(){return session===state.playbackSession && $("detail-dialog").open;};
   const message=function(value){if(current())$("playback-status").textContent=value;};
   const failed=function(value){if(!current())return;clearTimeout(state.playbackTimer);video.pause();message(value);button.disabled=false;button.classList.remove("hidden");button.textContent="Try playback again";};
-  button.disabled=true;button.classList.remove("hidden");message("Opening the original from Dropbox…");
-  if(state.demo){message("Demo clips have screenshots only. Connect Dropbox to play real originals.");return;}
+  button.disabled=true;button.classList.remove("hidden");message(original?"Opening the original from Dropbox…":"Opening the review preview…");
+  if(state.demo){message("Demo clips have screenshots only. Connect Dropbox to play real clips.");return;}
   try {
-    const result=await api("files/get_temporary_link",{path:record.file_id});
+    let result,link,preview=null;
+    if(original){result=await api("files/get_temporary_link",{path:record.file_id});link=originalPlaybackLink(record,result);}
+    else {
+      const source=await api("files/get_metadata",{path:record.file_id});
+      if(source.id!==record.file_id || source.rev!==record.rev)throw new Error("The original changed or is unavailable. Refresh before reviewing it.");
+      try{preview=await download(previewPath(record));}
+      catch(error){
+        if(error.status!==409 || !error.dropboxKind?.includes("not_found"))throw error;
+        if(!current())return;
+        // No media is advertised until its verified receipt has been published.
+        message("This review preview is queued or still being prepared. It will open automatically when ready.");button.disabled=false;button.classList.remove("hidden");button.textContent="Check preview";
+        state.previewRetryTimer=setTimeout(function(){if(current())playOriginal(record);},15000);return;
+      }
+      checkedPreview(record,preview);
+      result=await api("files/get_temporary_link",{path:child(preview.video_path)});
+      link=previewPlaybackLink(record,state.config,preview,result);
+    }
     if(!current())return;
-    const link=originalPlaybackLink(record,result);
-    video.onerror=function(){failed([3,4].includes(video.error?.code)?"This browser cannot play this original’s video format. Use Open in Dropbox to watch it.":"The original could not finish loading. Try playback again or use Open in Dropbox.");};
+    const kind=original?"original":"review preview";
+    video.onerror=function(){failed(original && [3,4].includes(video.error?.code)?"This browser cannot play this original’s video format. Use the review preview or Open in Dropbox.":"The "+kind+" could not finish loading. Try playback again or use Open in Dropbox.");};
     video.onloadedmetadata=function(){if(current())$("note-time").disabled=!canReview() || record.pipeline_status!=="analyzed";};
     const ready=function(){
       if(!current())return;
-      if(!video.videoWidth){failed("This browser cannot display the video in this original. Use Open in Dropbox to watch it.");return;}
-      clearTimeout(state.playbackTimer);button.classList.add("hidden");message("Original video"+(record.technical?.has_audio===false?" · no audio track":" · use the player’s sound controls"));
+      if(!video.videoWidth){failed("This browser cannot display this video. Try playback again or use Open in Dropbox.");return;}
+      clearTimeout(state.playbackTimer);button.classList.add("hidden");message((original?"Original video":"720p review preview · original unchanged")+((preview || record.technical)?.has_audio===false?" · no audio track":" · sound available"));
     };
     video.onloadeddata=video.oncanplay=video.onplaying=ready;
-    video.onwaiting=function(){message("Buffering the original from Dropbox…");};
-    video.onstalled=function(){if(video.readyState<3)message("Waiting for Dropbox. Large originals may take longer to load.");};
+    video.onwaiting=function(){message("Buffering the "+kind+"…");};
+    video.onstalled=function(){if(video.readyState<3)message("Waiting for Dropbox…");};
     video.src=link;video.load();button.classList.add("hidden");
-    state.playbackTimer=setTimeout(function(){if(current() && video.readyState<2)message("This original is taking a while to load. You can wait or use Open in Dropbox.");},30000);
+    state.playbackTimer=setTimeout(function(){if(current() && video.readyState<2)message("This video is taking a while to load. You can wait or use Open in Dropbox.");},30000);
     try{await video.play();}catch(error){
       if(!current())return;
       if(error.name==="NotAllowedError")message("Ready to watch. Press Play on the video.");
@@ -344,8 +360,8 @@ async function playOriginal(record=state.active) {
 async function openDetail(record,{play=true,focusNotes=false}={}) {
   stopOriginal();
   state.active=record;
-  $("review-error").classList.add("hidden");$("playback-status").textContent="Play the original video from Dropbox.";
-  $("play-original").disabled=false;$("play-original").textContent="Play original";$("play-original").classList.remove("hidden");
+  $("review-error").classList.add("hidden");$("playback-status").textContent="Play the review preview from Dropbox.";
+  $("play-original").disabled=false;$("play-original").textContent="Play preview";$("play-original").classList.remove("hidden");
   $("original-video").removeAttribute("poster");
   if(record.pipeline_status==="analyzed")imageUrl(record).then(function(url){if(state.active?.file_id===record.file_id && state.active?.rev===record.rev)$("original-video").poster=url;}).catch(function(){});
   $("detail-name").textContent=record.name;
@@ -479,6 +495,7 @@ function bind() {
   $("detail-close").addEventListener("click",function(){$("detail-dialog").close();});
   $("detail-dialog").addEventListener("close",function(){if(!$("detail-dialog").open)stopOriginal();});
   $("play-original").addEventListener("click",function(){playOriginal();});
+  $("use-original").addEventListener("click",function(){playOriginal(state.active,true);});
   $("feedback-note").addEventListener("input",rememberNotes);
   $("note-time").addEventListener("click",function(){
     const input=$("feedback-note"),stamp="At "+$("original-video").currentTime.toFixed(1)+"s — ";

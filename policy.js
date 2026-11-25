@@ -2,6 +2,25 @@ export const FACETS = ["subject","action","setting","location","shot_type","came
 export const BLOCKING = new Set(["identifiable_people","minors","people_in_care_setting","license_plates","private_information","competitor_branding","uncertain_people_visibility"]);
 export const RANK = {hero:0,solid:1,filler:2,reject:3};
 
+export function previewPath(record, name="ready.json") {
+  if(!/^[a-f0-9]{64}$/.test(record.file_key || "") || !/^[A-Za-z0-9_-]{1,128}$/.test(record.rev || "") || !["ready.json","preview.mp4"].includes(name))throw new Error("This file does not have a valid preview version.");
+  return "previews/h264-720-v1/"+record.file_key+"/"+record.rev+"/"+name;
+}
+
+export function checkedPreview(record, ready) {
+  const expected=record.technical?.duration;
+  if(!Number.isFinite(ready?.duration) || ready.duration<=0 || !(ready.fps>0 && ready.fps<=30.1) || (record.technical?.has_audio && !ready.has_audio) || !/^[a-f0-9]{64}$/.test(ready.content_hash || ""))throw new Error("The review preview format could not be verified.");
+  if(ready?.version!=="h264-720-v1" || ready.file_id!==record.file_id || ready.source_rev!==record.rev || ready.video_path!==previewPath(record,"preview.mp4") || (record.content_hash && ready.source_content_hash!==record.content_hash) || !/^id:[A-Za-z0-9_-]+$/.test(ready.video_id || "") || !ready.video_rev || ready.video_codec!=="h264" || ready.pixel_format!=="yuv420p" || (ready.has_audio && ready.audio_codec!=="aac") || !expected || Math.abs(ready.duration-expected)>Math.max(.3,expected*.001) || !(ready.width>0 && ready.height>0 && Math.min(ready.width,ready.height)<=720 && Math.max(ready.width,ready.height)<=1280))throw new Error("The review preview does not match this original. Try refreshing the library.");
+  return ready;
+}
+
+export function previewPlaybackLink(record, config, ready, response) {
+  checkedPreview(record,ready);
+  const expected=(config.catalogRoot.replace(/\/$/,"")+"/"+ready.video_path).toLowerCase();
+  if(response?.metadata?.path_lower!==expected || response.metadata.content_hash!==ready.content_hash)throw new Error("The review preview changed. Try loading it again.");
+  return originalPlaybackLink({file_id:ready.video_id,rev:ready.video_rev},response);
+}
+
 export function originalPlaybackLink(record, response) {
   if(!record.rev || response?.metadata?.id!==record.file_id || response.metadata.rev!==record.rev)throw new Error("The original changed or is no longer available. Refresh the library before reviewing it.");
   let url;try{url=new URL(response.link);}catch(error){throw new Error("Dropbox did not return a playable original link.");}

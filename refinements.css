@@ -1,4 +1,4 @@
-/* Play only the selected original. No generated video or public media is used. */
+/* Play only the selected private clip; review copies preserve the originals. */
 .play-original-card{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);z-index:2;background:#10151ee8;border:1px solid #bbc6d061;border-radius:24px;color:#fff;padding:10px 16px;font-size:.78rem;white-space:nowrap}.play-original-card:hover,.play-original-card:focus-visible{background:#243020;border-color:var(--accent)}
 .card-review-actions{display:flex;gap:7px;margin-top:15px;align-items:center}.card-review-actions .button{flex:1;min-width:0;padding:9px 6px}.card-review-actions .card-notes{flex:1.15}
 .original-player{background:#070a0f;border:1px solid var(--line);border-radius:7px;overflow:hidden}.original-player video{display:block;width:100%;aspect-ratio:16/9;max-height:55vh;object-fit:contain;background:#070a0f}
