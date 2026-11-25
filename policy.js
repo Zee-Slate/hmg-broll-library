@@ -2,6 +2,35 @@ export const FACETS = ["subject","action","setting","location","shot_type","came
 export const BLOCKING = new Set(["identifiable_people","minors","people_in_care_setting","license_plates","private_information","competitor_branding","uncertain_people_visibility"]);
 export const RANK = {hero:0,solid:1,filler:2,reject:3};
 
+export function originalPlaybackLink(record, response) {
+  if(!record.rev || response?.metadata?.id!==record.file_id || response.metadata.rev!==record.rev)throw new Error("The original changed or is no longer available. Refresh the library before reviewing it.");
+  let url;try{url=new URL(response.link);}catch(error){throw new Error("Dropbox did not return a playable original link.");}
+  if(url.protocol!=="https:" || url.username || url.password || !(url.hostname.endsWith(".dropboxusercontent.com") || url.hostname==="dl.dropbox.com"))throw new Error("Dropbox did not return a playable original link.");
+  return url.href;
+}
+
+export function reviewTier(record) {
+  return [record.human?.tier,record.quality?.suggested_tier,record.ai?.suggested_tier,"solid"].find(function(tier){return ["hero","solid","filler"].includes(tier);});
+}
+
+export function reviewDecision(record, status, fields={}) {
+  if(!["approved","rejected"].includes(status))throw new Error("Choose Keep or Reject.");
+  const human=record.human || {};
+  const decision={status:status,tier:status==="rejected"?"reject":fields.tier ?? reviewTier(record),
+    general_use_cleared:status==="approved" && (fields.general_use_cleared ?? human.general_use_cleared ?? false),
+    safety_reviewed:fields.safety_reviewed ?? human.safety_reviewed ?? false,
+    notes:fields.notes ?? human.notes ?? record.ai?.best_section_note ?? "",
+    tags_added:fields.tags_added ?? human.tags_added ?? {},tags_removed:fields.tags_removed ?? human.tags_removed ?? {},
+    feedback_reasons:fields.feedback_reasons ?? human.feedback_reasons ?? [],feedback_note:fields.feedback_note ?? human.feedback_note ?? "",
+    proposal_id:record.quality?.proposal_id || null};
+  if(status==="approved" && !["hero","solid","filler"].includes(decision.tier))throw new Error("Choose a quality tier.");
+  if(!Array.isArray(decision.feedback_reasons) || decision.feedback_reasons.length>5)throw new Error("Choose up to five main reasons.");
+  if(typeof decision.feedback_note!=="string" || decision.feedback_note.length>1200)throw new Error("Training notes must be at most 1200 characters.");
+  if(status==="approved" && record.ai?.safety_flags?.length && !decision.safety_reviewed)throw new Error("Confirm that you checked the publication and safety concerns.");
+  if(decision.general_use_cleared && !generalSafe(record))throw new Error("This file cannot enter the general-use pool.");
+  return decision;
+}
+
 export class CatalogUpdatingError extends Error {
   constructor(){super("New clips are still being added. Please try opening the library again shortly.");this.name="CatalogUpdatingError";}
 }

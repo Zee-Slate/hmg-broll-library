@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="referrer" content="no-referrer">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; connect-src 'self' https://api.dropboxapi.com https://content.dropboxapi.com; object-src 'none'; base-uri 'self'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' blob: data:; media-src https://*.dropboxusercontent.com https://dl.dropbox.com; connect-src 'self' https://api.dropboxapi.com https://content.dropboxapi.com; object-src 'none'; base-uri 'self'; form-action 'none'">
   <title>B-roll Library</title>
   <link rel="icon" href="./favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="./styles.css">
@@ -73,8 +73,27 @@
   </div>
   <dialog id="detail-dialog" class="detail-dialog">
     <div class="detail-header"><div><span class="eyebrow">SOURCE FILE</span><h2 id="detail-name"></h2></div><button id="detail-close" class="icon-button" aria-label="Close details">✕</button></div>
-    <div class="detail-body"><div><img id="detail-sheet" class="detail-sheet" alt="Contact sheet"><div id="detail-no-sheet" class="no-sheet hidden">This file is waiting for frame sampling.</div><p id="detail-description"></p><div id="detail-tags" class="tags"></div><section id="detail-speech" class="speech-panel"></section><div class="source-actions"><button id="open-dropbox" class="button">Open in Dropbox</button><button id="copy-path" class="button">Copy path</button><button id="add-pull" class="button">Add to pull list</button></div><p id="detail-path" class="source-path"></p><div id="technical-notes" class="technical-notes"></div></div>
-      <div class="review-form"><section id="quality-suggestion" class="quality-suggestion"></section><div class="eyebrow">YOUR DECISION</div><p id="review-status"></p><label>Quality tier<select id="review-tier"><option value="hero">Hero — best of the library</option><option value="solid">Solid — dependable B-roll</option><option value="filler">Filler — useful when needed</option></select></label><div id="safety-flags" class="safety-flags"></div><label id="safety-review-label" class="checkbox-label hidden"><input id="safety-reviewed" type="checkbox"> I checked the publication and safety concerns.</label><label class="checkbox-label"><input id="review-general" type="checkbox"> Cleared for use across clients</label><p id="general-reason" class="field-help"></p><details id="feedback-details"><summary>Why keep or reject? Help it learn</summary><div id="feedback-reasons" class="feedback-reasons"></div><label>A rule or correction for next time<textarea id="feedback-note" rows="2" maxlength="1200" placeholder="For example: keep slow intentional pans; reject focus hunting throughout."></textarea></label><p class="field-help">Optional. A reason is especially helpful when changing the AI suggestion.</p></details><label>Best section / reviewer notes<textarea id="review-notes" rows="3" placeholder="Add context that will help the next editor."></textarea></label><details id="tag-editor"><summary>Edit tags</summary><div id="tag-inputs"></div></details><label class="checkbox-label"><input id="review-next" type="checkbox" checked> Open the next clip after saving</label><div class="review-actions"><button id="reject" class="button danger">Reject clip</button><button id="approve" class="button primary">Keep clip</button></div><p class="field-help">Your decision controls approval. The processor verifies and merges it, then updates this client’s grading guide.</p></div>
+    <div class="detail-body"><div>
+      <div class="original-player"><video id="original-video" controls playsinline preload="none" aria-label="Original video"></video></div>
+      <div class="playback-toolbar"><p id="playback-status" role="status" aria-live="polite">Play the original video from Dropbox.</p><button id="play-original" class="button small">Play original</button></div>
+      <div class="source-actions"><button id="open-dropbox" class="button">Open in Dropbox</button><button id="copy-path" class="button">Copy path</button><button id="add-pull" class="button">Add to pull list</button></div>
+      <p id="detail-description"></p><div id="detail-tags" class="tags"></div>
+      <details class="contact-sheet-details"><summary>View sampled frames</summary><img id="detail-sheet" class="detail-sheet" alt="Contact sheet"><div id="detail-no-sheet" class="no-sheet hidden">This file is waiting for frame sampling.</div></details>
+      <section id="detail-speech" class="speech-panel"></section><p id="detail-path" class="source-path"></p><div id="technical-notes" class="technical-notes"></div>
+    </div>
+      <div class="review-form">
+        <div class="eyebrow">YOUR DECISION</div><p id="review-status"></p>
+        <label>Quality tier<select id="review-tier"><option value="hero">Hero — best of the library</option><option value="solid">Solid — dependable B-roll</option><option value="filler">Filler — useful when needed</option></select></label>
+        <div class="training-notes"><div class="training-note-heading"><label for="feedback-note">Training notes <span>(optional)</span></label><button id="note-time" class="button small" disabled>Note this moment</button></div><textarea id="feedback-note" rows="3" maxlength="1200" placeholder="What makes this good or bad B-roll? For example: keep this slow pan; reject the focus hunting."></textarea><p class="field-help">Saved with Keep or Reject. Your notes help improve this client’s grading guide.</p></div>
+        <div id="safety-flags" class="safety-flags"></div><label id="safety-review-label" class="checkbox-label hidden"><input id="safety-reviewed" type="checkbox"> I checked the publication and safety concerns.</label>
+        <p id="review-error" class="review-error hidden" role="alert"></p>
+        <div class="review-actions"><button id="reject" class="button danger">Reject clip</button><button id="approve" class="button primary">Keep clip</button></div>
+        <label class="checkbox-label"><input id="review-next" type="checkbox" checked> Open the next clip after saving</label>
+        <section id="quality-suggestion" class="quality-suggestion"></section>
+        <details id="feedback-details"><summary>Add feedback reasons</summary><div id="feedback-reasons" class="feedback-reasons"></div></details>
+        <details class="extra-review"><summary>General use and editor notes</summary><label class="checkbox-label"><input id="review-general" type="checkbox"> Cleared for use across clients</label><p id="general-reason" class="field-help"></p><label>Best section / reviewer notes<textarea id="review-notes" rows="3" placeholder="Add context that will help the next editor."></textarea></label></details>
+        <details id="tag-editor"><summary>Edit tags</summary><div id="tag-inputs"></div></details>
+      </div>
     </div>
   </dialog>
   <dialog id="bulk-dialog" class="bulk-dialog"><h2>Review hero suggestions</h2><p id="bulk-description"></p><div id="bulk-files"></div><label class="checkbox-label"><input id="bulk-confirm" type="checkbox"> I reviewed these files and confirm their usability.</label><div class="dialog-actions"><button id="bulk-cancel" class="button">Cancel</button><button id="bulk-save" class="button primary" disabled>Approve selected heroes</button></div></dialog>

@@ -1,8 +1,8 @@
-import {FACETS,effectiveTags,generalSafe,generalApproved,applyPending,searchRows,canReviewCatalog,createCatalogLoader,requireCatalogGeneration} from "./policy.js";
+import {FACETS,effectiveTags,generalSafe,generalApproved,applyPending,searchRows,canReviewCatalog,createCatalogLoader,requireCatalogGeneration,originalPlaybackLink,reviewTier,reviewDecision} from "./policy.js";
 import {REASONS,qualityLabel,learningPriority,learningSummary} from "./feedback.js";
 
 const $ = function(id) {return document.getElementById(id);};
-const state = {config:null,token:null,refreshToken:null,expires:0,account:null,manifest:null,records:[],pending:[],selected:new Set(),client:null,generalOnly:false,view:"browse",demo:false,active:null,blobs:new Map(),access:new Map(),generation:0,bulk:[],visibleLimit:48};
+const state = {config:null,token:null,refreshToken:null,expires:0,account:null,manifest:null,records:[],pending:[],selected:new Set(),client:null,generalOnly:false,view:"browse",demo:false,active:null,blobs:new Map(),access:new Map(),generation:0,bulk:[],visibleLimit:48,reviewDrafts:new Map(),saving:false,playbackSession:0};
 function element(tag,className,text) {const node=document.createElement(tag);if(className)node.className=className;if(text!==undefined)node.textContent=text;return node;}
 function notice(message,error=false) {$("notice").textContent=message;$("notice").classList.toggle("hidden",!message);$("notice").classList.toggle("error",error);}
 function key(record) {const value=record.file_key || String(record.file_id).replace(/^id:/,"");if(!/^[A-Za-z0-9_-]+$/.test(value))throw new Error("Invalid file identifier.");return value;}
@@ -181,6 +181,8 @@ function makeCard(record) {
   selection.addEventListener("click",function(event){event.stopPropagation();});
   selection.addEventListener("change",function(){toggleSelection(record);card.classList.toggle("selected",state.selected.has(record.file_id));});
   preview.append(selection);
+  const play=element("button","play-original-card","▶ Play original");play.type="button";play.setAttribute("aria-label","Play original "+record.name);
+  play.addEventListener("click",function(event){event.stopPropagation();openDetail(record);});preview.append(play);
   const info=element("div","clip-info");info.append(element("h3","",title(record)));
   const meta=element("div","clip-meta");
   const technical=record.technical || {};
@@ -192,10 +194,20 @@ function makeCard(record) {
   if(state.view==="review"){
     info.append(element("p","suggestion-label "+(record.quality?.decision || "pending"),qualityLabel(record)));
     if(record.quality?.reason)info.append(element("p","suggestion-reason",record.quality.reason));
+    const actions=element("div","card-review-actions");
+    const keep=element("button","button small primary","Keep"),reject=element("button","button small danger","Reject"),notes=element("button","button small card-notes","Notes");
+    keep.type=reject.type=notes.type="button";
+    keep.setAttribute("aria-label","Keep "+record.name);reject.setAttribute("aria-label","Reject "+record.name);notes.setAttribute("aria-label","Training notes for "+record.name);
+    notes.dataset.draftKey=draftKey(record);notes.textContent=state.reviewDrafts.has(draftKey(record))?"Notes · draft":"Notes";
+    keep.disabled=reject.disabled=!canReview() || record.pipeline_status!=="analyzed" || !record.rev;
+    keep.addEventListener("click",function(event){event.stopPropagation();quickDecide(record,"approved",actions);});
+    reject.addEventListener("click",function(event){event.stopPropagation();quickDecide(record,"rejected",actions);});
+    notes.addEventListener("click",function(event){event.stopPropagation();openDetail(record,{play:false,focusNotes:true});});
+    actions.append(keep,reject,notes);info.append(actions);
   }
   card.append(preview,info);
   card.addEventListener("click",function(){openDetail(record);});
-  card.addEventListener("keydown",function(event){if(event.key==="Enter"){event.preventDefault();openDetail(record);}});
+  card.addEventListener("keydown",function(event){if(event.target===card && event.key==="Enter"){event.preventDefault();openDetail(record);}});
   return card;
 }
 function updateSelected() {
@@ -283,8 +295,59 @@ function renderSpeech(record) {
   if(spoken?.moments?.length){const moments=element("details","");moments.append(element("summary","","Spoken moments"));spoken.moments.forEach(function(m){moments.append(element("p","",speechTime(m.start)+"–"+speechTime(m.end)+" · "+m.topic+" — "+m.summary));});panel.append(moments);}
   const transcript=element("details","");transcript.append(element("summary","","Transcript · "+(speech.segments?.length || 0)+" passages"));const rows=element("div","transcript-rows");(speech.segments || []).forEach(function(r){rows.append(element("p","",speechTime(r.start)+"–"+speechTime(r.end)+" · "+r.text));});transcript.append(rows);panel.append(transcript,element("p","field-help","Automatic transcript · source-relative timestamps · "+(spoken?.context_complete===false?"summary uses selected passages":"complete available audio analyzed")));
 }
-async function openDetail(record) {
+function draftKey(record) {return record.file_id+":"+record.rev+":"+(record.human?.decision_id || "");}
+function draftNote(record) {return state.reviewDrafts.get(draftKey(record)) ?? record.human?.feedback_note ?? "";}
+function rememberNotes() {
+  const record=state.active;if(!record)return;
+  const id=draftKey(record),value=$("feedback-note").value;
+  if(value===(record.human?.feedback_note || ""))state.reviewDrafts.delete(id);else state.reviewDrafts.set(id,value);
+  document.querySelectorAll(".card-notes").forEach(function(button){if(button.dataset.draftKey===id)button.textContent=state.reviewDrafts.has(id)?"Notes · draft":"Notes";});
+}
+function stopOriginal() {
+  state.playbackSession++;clearTimeout(state.playbackTimer);
+  const video=$("original-video");
+  video.onerror=video.onloadedmetadata=video.onloadeddata=video.oncanplay=video.onplaying=video.onwaiting=video.onstalled=null;
+  video.pause();video.removeAttribute("src");video.load();
+  $("note-time").disabled=true;
+}
+async function playOriginal(record=state.active) {
+  if(!record || state.active?.file_id!==record.file_id)return;
+  stopOriginal();const session=state.playbackSession,video=$("original-video"),button=$("play-original");
+  const current=function(){return session===state.playbackSession && $("detail-dialog").open;};
+  const message=function(value){if(current())$("playback-status").textContent=value;};
+  const failed=function(value){if(!current())return;clearTimeout(state.playbackTimer);video.pause();message(value);button.disabled=false;button.classList.remove("hidden");button.textContent="Try playback again";};
+  button.disabled=true;button.classList.remove("hidden");message("Opening the original from Dropbox…");
+  if(state.demo){message("Demo clips have screenshots only. Connect Dropbox to play real originals.");return;}
+  try {
+    const result=await api("files/get_temporary_link",{path:record.file_id});
+    if(!current())return;
+    const link=originalPlaybackLink(record,result);
+    video.onerror=function(){failed([3,4].includes(video.error?.code)?"This browser cannot play this original’s video format. Use Open in Dropbox to watch it.":"The original could not finish loading. Try playback again or use Open in Dropbox.");};
+    video.onloadedmetadata=function(){if(current())$("note-time").disabled=!canReview() || record.pipeline_status!=="analyzed";};
+    const ready=function(){
+      if(!current())return;
+      if(!video.videoWidth){failed("This browser cannot display the video in this original. Use Open in Dropbox to watch it.");return;}
+      clearTimeout(state.playbackTimer);button.classList.add("hidden");message("Original video"+(record.technical?.has_audio===false?" · no audio track":" · use the player’s sound controls"));
+    };
+    video.onloadeddata=video.oncanplay=video.onplaying=ready;
+    video.onwaiting=function(){message("Buffering the original from Dropbox…");};
+    video.onstalled=function(){if(video.readyState<3)message("Waiting for Dropbox. Large originals may take longer to load.");};
+    video.src=link;video.load();button.classList.add("hidden");
+    state.playbackTimer=setTimeout(function(){if(current() && video.readyState<2)message("This original is taking a while to load. You can wait or use Open in Dropbox.");},30000);
+    try{await video.play();}catch(error){
+      if(!current())return;
+      if(error.name==="NotAllowedError")message("Ready to watch. Press Play on the video.");
+      else if(error.name!=="AbortError" && !video.error)failed("This browser could not start the original. Try playback again or use Open in Dropbox.");
+    }
+  }catch(error){failed(error.message);}
+}
+async function openDetail(record,{play=true,focusNotes=false}={}) {
+  stopOriginal();
   state.active=record;
+  $("review-error").classList.add("hidden");$("playback-status").textContent="Play the original video from Dropbox.";
+  $("play-original").disabled=false;$("play-original").textContent="Play original";$("play-original").classList.remove("hidden");
+  $("original-video").removeAttribute("poster");
+  if(record.pipeline_status==="analyzed")imageUrl(record).then(function(url){if(state.active?.file_id===record.file_id && state.active?.rev===record.rev)$("original-video").poster=url;}).catch(function(){});
   $("detail-name").textContent=record.name;
   $("detail-description").textContent=record.ai?.description || "This file is inventoried and waiting for analysis.";
   renderSpeech(record);
@@ -293,8 +356,8 @@ async function openDetail(record) {
   else suggestion.append(element("p","field-help","This clip is waiting for the new quality assessment."));
   $("feedback-reasons").replaceChildren();
   Object.entries(REASONS).forEach(function(entry){const label=element("label","feedback-chip"),input=element("input");input.type="checkbox";input.value=entry[0];input.checked=(record.human?.feedback_reasons || []).includes(entry[0]);input.disabled=!canReview();label.append(input,element("span","",entry[1]));$("feedback-reasons").append(label);});
-  $("feedback-note").value=record.human?.feedback_note || "";$("feedback-note").disabled=!canReview();
-  $("feedback-details").open=!!record.human?.feedback_reasons?.length || !!record.human?.feedback_note;
+  $("feedback-note").value=draftNote(record);$("feedback-note").disabled=!canReview();
+  $("feedback-details").open=!!record.human?.feedback_reasons?.length;
   $("detail-path").textContent=record.path;
   $("detail-tags").replaceChildren(...Object.values(effectiveTags(record)).flat().filter(function(tag){return !["none","unknown"].includes(tag);}).map(function(tag){return element("span","tag",tag);}));
   $("detail-sheet").classList.toggle("hidden",record.pipeline_status!=="analyzed");
@@ -302,7 +365,7 @@ async function openDetail(record) {
   $("detail-sheet").removeAttribute("src");
   if(record.pipeline_status==="analyzed")imageUrl(record,true).then(function(url){if(state.active?.file_id===record.file_id)$("detail-sheet").src=url;}).catch(function(){});
   $("review-status").textContent=(record.human?.status || "needs_review").replaceAll("_"," ")+(record.human?.pending?" · saved, awaiting merge":"");
-  $("review-tier").value=record.human?.tier && record.human.tier!=="reject"?record.human.tier:(record.ai?.suggested_tier!=="reject"?record.ai?.suggested_tier:"solid") || "solid";
+  $("review-tier").value=reviewTier(record);
   $("review-notes").value=record.human?.notes || record.ai?.best_section_note || "";
   $("review-general").checked=record.human?.general_use_cleared===true;
   $("review-general").disabled=!generalSafe(record) || !canReview();
@@ -320,26 +383,28 @@ async function openDetail(record) {
   $("review-notes").disabled=!ready;$("review-tier").disabled=!ready;
   $("add-pull").disabled=record.human?.status!=="approved";
   if(!$("detail-dialog").open)$("detail-dialog").showModal();
+  if(focusNotes)$("feedback-note").focus();
+  if(play)playOriginal(record);
 }
 async function saveDecision(record,status,overrides={}) {
   if(!canReview() || !record.rev || record.pipeline_status!=="analyzed")throw new Error("This file is not ready for review.");
-  const original=record.ai?.tags || {}, added={},removed={};
-  document.querySelectorAll("#tag-inputs input").forEach(function(input){
-    const facet=input.dataset.facet,next=input.value.split(",").map(function(x){return x.trim();}).filter(Boolean);
-    added[facet]=next.filter(function(x){return !(original[facet] || []).includes(x);});
-    removed[facet]=(original[facet] || []).filter(function(x){return !next.includes(x);});
-  });
-  const decision={status:status,tier:status==="rejected"?"reject":$("review-tier").value,general_use_cleared:status==="approved" && $("review-general").checked,safety_reviewed:$("safety-reviewed").checked,notes:$("review-notes").value,tags_added:added,tags_removed:removed,...overrides};
   const useForm=$("detail-dialog").open && state.active?.file_id===record.file_id;
-  decision.feedback_reasons=useForm?[...$("feedback-reasons").querySelectorAll("input:checked")].map(function(input){return input.value;}):[];
-  decision.feedback_note=useForm?$("feedback-note").value:"";
-  decision.proposal_id=record.quality?.proposal_id || null;
-  if(decision.feedback_reasons.length>5)throw new Error("Choose up to five main reasons.");
-  if(status==="approved" && record.ai?.safety_flags?.length && !decision.safety_reviewed)throw new Error("Confirm that you checked the publication and safety concerns.");
-  if(decision.general_use_cleared && !generalSafe(record))throw new Error("This file cannot enter the general-use pool.");
+  let fields={feedback_note:draftNote(record)};
+  if(useForm){
+    const original=record.ai?.tags || {},added={},removed={};
+    document.querySelectorAll("#tag-inputs input").forEach(function(input){
+      const facet=input.dataset.facet,next=input.value.split(",").map(function(x){return x.trim();}).filter(Boolean);
+      added[facet]=next.filter(function(x){return !(original[facet] || []).includes(x);});
+      removed[facet]=(original[facet] || []).filter(function(x){return !next.includes(x);});
+    });
+    fields={tier:$("review-tier").value,general_use_cleared:$("review-general").checked,safety_reviewed:$("safety-reviewed").checked,notes:$("review-notes").value,tags_added:added,tags_removed:removed,feedback_note:$("feedback-note").value,feedback_reasons:[...$("feedback-reasons").querySelectorAll("input:checked")].map(function(input){return input.value;})};
+  }
+  const decision=reviewDecision(record,status,{...fields,...overrides});
   const event={schema_version:1,type:"human_decision",actor_kind:"human",human_confirmation:true,file_id:record.file_id,source_rev:record.rev,base_decision_id:record.human?.decision_id || null,reviewer_account_id:state.account?.account_id || "demo-reviewer",created_at:new Date().toISOString(),decision:decision};
   if(state.demo){event.event_id="demo:"+crypto.randomUUID();state.pending.push(event);return;}
   await tokenReady();
+  const source=await api("files/get_metadata",{path:record.file_id});
+  if(source.id!==record.file_id || source.rev!==record.rev)throw new Error("The original changed. Refresh the library before saving your decision.");
   const folder="decisions/"+state.account.account_id.replace(/[^A-Za-z0-9_-]/g,"_");
   try{await api("files/create_folder_v2",{path:child(folder),autorename:false});}catch(error){if(!String(error.message).includes("conflict"))throw error;}
   const filename=new Date().toISOString().replace(/[-:.TZ]/g,"")+"-"+crypto.randomUUID()+"-"+key(record)+".json";
@@ -350,16 +415,34 @@ async function saveDecision(record,status,overrides={}) {
   if(location.hostname==="127.0.0.1")fetch("./review-sync",{method:"POST",headers:{"X-Broll-Review-Sync":"1"},signal:AbortSignal.timeout(5000)}).catch(function(){});
 }
 async function decide(status) {
+  if(state.saving)return;
+  const record=state.active;state.saving=true;
   try {
     const advance=$("review-next").checked && state.view==="review";
     const order=state.reviewOrder || [],index=order.indexOf(state.active.file_id),nextIds=order.slice(index+1);
     $("approve").disabled=true;$("reject").disabled=true;
-    await saveDecision(state.active,status);
-    $("detail-dialog").close();
+    await saveDecision(record,status);state.reviewDrafts.delete(draftKey(record));
+    const stillOpen=$("detail-dialog").open && state.active?.file_id===record.file_id;
+    if(stillOpen)$("detail-dialog").close();
+    state.saving=false;
     notice(state.demo?"Demo decision applied locally. No Dropbox file was written.":"Decision saved to Dropbox. It is visible here while the processor merges it.");
     await render();
-    if(advance){const nextId=nextIds.find(function(id){return state.reviewOrder?.includes(id);});const next=rowsWithPending().find(function(r){return r.file_id===nextId;});if(next)await openDetail(next);}
-  }catch(error){notice(error.message,true);$("approve").disabled=false;$("reject").disabled=false;}
+    if(advance && stillOpen){const nextId=nextIds.find(function(id){return state.reviewOrder?.includes(id);});const next=rowsWithPending().find(function(r){return r.file_id===nextId;});if(next)await openDetail(next);}
+  }catch(error){notice(error.message,true);$("review-error").textContent=error.message;$("review-error").classList.remove("hidden");$("approve").disabled=false;$("reject").disabled=false;}
+  finally{state.saving=false;}
+}
+async function quickDecide(record,status,controls) {
+  if(state.saving)return;
+  if(status==="approved" && record.ai?.safety_flags?.length && !record.human?.safety_reviewed){
+    await openDetail(record);$("review-error").textContent="Check the publication concerns below, then choose Keep.";$("review-error").classList.remove("hidden");return;
+  }
+  state.saving=true;controls.querySelectorAll("button").forEach(function(button){button.disabled=true;});
+  try {
+    await saveDecision(record,status);state.reviewDrafts.delete(draftKey(record));
+    notice(state.demo?"Demo decision applied locally. No Dropbox file was written.":"Decision and training notes saved to Dropbox.");
+    await render();
+  }catch(error){notice(error.message,true);controls.querySelectorAll("button").forEach(function(button){button.disabled=false;});}
+  finally{state.saving=false;}
 }
 function dropboxUrl(record) {const split=record.path.lastIndexOf("/");return "https://www.dropbox.com/home"+record.path.slice(0,split).split("/").map(encodeURIComponent).join("/")+"?preview="+encodeURIComponent(record.path.slice(split+1));}
 function exportPullList() {
@@ -382,7 +465,7 @@ function startDemo() {
   });
   $("demo-banner").classList.remove("hidden");$("connect").classList.remove("hidden");$("connect").textContent="Connect real Dropbox";$("signout").classList.remove("hidden");$("connection-status").textContent="Demo workspace";$("updated").textContent="Synthetic demo · nothing is stored in Dropbox";setAccount();buildClients();notice("");render();
 }
-function signout() {state.token=null;state.refreshToken=null;state.account=null;state.records=[];state.pending=[];state.selected.clear();state.blobs.forEach(URL.revokeObjectURL);state.blobs.clear();location.assign(location.pathname);}
+function signout() {stopOriginal();state.reviewDrafts.clear();state.token=null;state.refreshToken=null;state.account=null;state.records=[];state.pending=[];state.selected.clear();state.blobs.forEach(URL.revokeObjectURL);state.blobs.clear();location.assign(location.pathname);}
 function bind() {
   $("connect").addEventListener("click",function(){connect().catch(function(error){notice(error.message,true);});});
   $("try-demo").addEventListener("click",startDemo);
@@ -394,6 +477,13 @@ function bind() {
   $("general-pool").addEventListener("click",function(){if(!state.manifest)return;state.generalOnly=true;state.view="browse";buildClients();render();});
   $("pull-list").addEventListener("click",exportPullList);
   $("detail-close").addEventListener("click",function(){$("detail-dialog").close();});
+  $("detail-dialog").addEventListener("close",function(){if(!$("detail-dialog").open)stopOriginal();});
+  $("play-original").addEventListener("click",function(){playOriginal();});
+  $("feedback-note").addEventListener("input",rememberNotes);
+  $("note-time").addEventListener("click",function(){
+    const input=$("feedback-note"),stamp="At "+$("original-video").currentTime.toFixed(1)+"s — ";
+    input.value=(input.value+(input.value?"\n":"")+stamp).slice(0,1200);rememberNotes();input.focus();
+  });
   $("approve").addEventListener("click",function(){decide("approved");});
   $("reject").addEventListener("click",function(){decide("rejected");});
   $("open-dropbox").addEventListener("click",function(){if(state.demo){notice("This is a synthetic demo file. No real Dropbox footage is linked.");return;}accessible(state.active).then(function(ok){if(ok)window.open(dropboxUrl(state.active),"_blank","noopener,noreferrer");else notice("Source access or revision changed. Refresh before opening.",true);});});
@@ -409,6 +499,7 @@ function bind() {
     catch(error){notice(error.message,true);$("bulk-save").disabled=false;}
   });
   document.addEventListener("keydown",function(event){
+    if(event.ctrlKey || event.metaKey || event.altKey || event.repeat || state.saving)return;
     if(["INPUT","TEXTAREA","SELECT"].includes(document.activeElement?.tagName))return;
     if(event.key==="/" && !$("detail-dialog").open){event.preventDefault();$("search").focus();}
     if(!$("detail-dialog").open)return;
@@ -424,6 +515,6 @@ async function init() {
   bind();
   try{state.config=await fetch("./config.json",{cache:"no-store"}).then(function(response){return response.json();});if(new URLSearchParams(location.search).get("demo")==="1"){startDemo();return;}await callback();}
   catch(error){notice(error.message,true);}
-  setInterval(function(){if(state.token && !state.demo && !$("detail-dialog").open && !$("bulk-dialog").open)loadCatalog().catch(function(error){notice(error.message,true);});},45000);
+  setInterval(function(){if(state.token && !state.demo && !state.saving && !$("detail-dialog").open && !$("bulk-dialog").open)loadCatalog().catch(function(error){notice(error.message,true);});},45000);
 }
 init();
